@@ -10,16 +10,14 @@ warnings.filterwarnings("ignore")
 st.set_page_config(page_title="尾盘选股", page_icon="📈", layout="wide",
                    initial_sidebar_state="expanded")
 
-col_logo, col_title = st.columns([1, 6])
-with col_logo:
-    st.markdown(
-        "<div style='background:#c0392b;color:white;font-size:28px;font-weight:900;"
-        "border-radius:10px;padding:10px 16px;text-align:center;margin-top:8px;letter-spacing:4px;'>"
-        "洪章</div>",
-        unsafe_allow_html=True,
-    )
-with col_title:
-    st.title("📈 尾盘选股系统")
+st.markdown(
+    "<div style='display:flex;align-items:center;gap:14px;margin-bottom:4px;'>"
+    "<div style='background:#c0392b;color:white;font-size:20px;font-weight:900;"
+    "border-radius:8px;padding:6px 14px;letter-spacing:4px;white-space:nowrap;'>洪章</div>"
+    "<span style='font-size:32px;font-weight:700;'>📈 尾盘选股系统</span>"
+    "</div>",
+    unsafe_allow_html=True,
+)
 st.caption("适用时间：每个交易日 14:30 - 15:00")
 
 with st.sidebar:
