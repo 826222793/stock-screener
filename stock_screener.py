@@ -32,7 +32,8 @@ with st.sidebar:
     max_amplitude = st.slider("最大振幅 (%)", 3.0, 15.0, 5.0, 0.5)
 
     st.subheader("💰 资金流向条件")
-    filter_fund = st.checkbox("近3日主力净流入为正", value=True)
+    filter_fund = st.checkbox("主力净流入为正", value=True)
+    fund_days = st.radio("统计周期", ["1天", "3天", "7天"], index=1, horizontal=True)
 
     run_btn = st.button("🔍 开始筛选", type="primary", use_container_width=True)
 
@@ -104,9 +105,12 @@ def fetch_turnover_mv():
     df["code_clean"] = df["symbol"].str.replace(r"^(sh|sz|bj)", "", regex=True)
     return df[["code_clean", "turnoverratio", "nmc"]], None
 
+# 1天对应 f62，3天对应 f267，7天对应 f164
+FUND_FIELD_MAP = {"1天": "f62", "3天": "f267", "7天": "f164"}
+
 @st.cache_data(ttl=300)
-def fetch_fund_flow_3d():
-    """直连东财接口获取3日主力净流入，带重试"""
+def fetch_fund_flow(days: str):
+    field = FUND_FIELD_MAP.get(days, "f267")
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0",
         "Referer": "https://data.eastmoney.com/zjlx/list.html",
@@ -119,8 +123,8 @@ def fetch_fund_flow_3d():
             for pn in range(1, 60):
                 url = (
                     "https://push2.eastmoney.com/api/qt/clist/get"
-                    f"?fid=f62&fs=m:0+t:6,m:0+t:13,m:0+t:80,m:1+t:2,m:1+t:23,m:1+t:4"
-                    f"&fields=f12,f14,f62&pn={pn}&pz=100&np=1&fltt=2&invt=2"
+                    f"?fid={field}&fs=m:0+t:6,m:0+t:13,m:0+t:80,m:1+t:2,m:1+t:23,m:1+t:4"
+                    f"&fields=f12,f14,{field}&pn={pn}&pz=100&np=1&fltt=2&invt=2"
                 )
                 r = session.get(url, headers=headers, timeout=15)
                 data = r.json()
@@ -137,7 +141,7 @@ def fetch_fund_flow_3d():
         return None, "资金流向接口无法获取数据"
 
     df = pd.DataFrame(all_data)
-    df["净流入"] = pd.to_numeric(df.get("f62", pd.Series()), errors="coerce")
+    df["净流入"] = pd.to_numeric(df.get(field, pd.Series(dtype=float)), errors="coerce")
     df["code_clean"] = df["f12"].astype(str).str.zfill(6)
     return df[["code_clean", "净流入"]], None
 
@@ -170,14 +174,15 @@ def screen_stocks(base_df, extra_df, fund_df, params):
         mask = mask & (d["净流入"] > 0)
 
     result = d[mask].copy()
+    fund_label = f"{params['fund_days']}主力净流入(万)"
     cols = ["代码", "名称", "最新价", "涨跌幅", "turnoverratio", "nmc", "振幅", "净流入", "成交额"]
-    labels = ["股票代码", "股票名称", "最新价", "涨跌幅(%)", "换手率(%)", "流通市值(亿)", "振幅(%)", "3日主力净流入(万)", "成交额(元)"]
+    labels = ["股票代码", "股票名称", "最新价", "涨跌幅(%)", "换手率(%)", "流通市值(亿)", "振幅(%)", fund_label, "成交额(元)"]
     display = result[cols].copy()
     display.columns = labels
-    display["3日主力净流入(万)"] = display["3日主力净流入(万)"] / 10000
+    display[fund_label] = display[fund_label] / 10000
     display = display.sort_values("涨跌幅(%)", ascending=False).reset_index(drop=True)
     display.index += 1
-    return display, len(d)
+    return display, len(d), fund_label
 
 if run_btn:
     params = {
@@ -186,6 +191,7 @@ if run_btn:
         "min_mv": min_mv, "max_mv": max_mv,
         "max_amplitude": max_amplitude,
         "filter_fund": filter_fund,
+        "fund_days": fund_days,
     }
 
     progress = st.progress(0, text="正在获取行情数据...")
@@ -196,8 +202,8 @@ if run_btn:
         progress.progress(35, text="正在获取换手率/市值数据（约20秒）...")
         extra_df, err = fetch_turnover_mv()
         if not err:
-            progress.progress(70, text="正在获取3日资金流向数据...")
-            fund_df, fund_err = fetch_fund_flow_3d()
+            progress.progress(70, text=f"正在获取{fund_days}资金流向数据...")
+            fund_df, fund_err = fetch_fund_flow(fund_days)
             if fund_err:
                 st.warning(f"资金流向数据获取失败（{fund_err}），将跳过该条件")
                 fund_df = None
@@ -213,7 +219,7 @@ if run_btn:
     elif extra_df is None:
         st.error("换手率数据为空")
     else:
-        result_df, total = screen_stocks(base_df, extra_df, fund_df, params)
+        result_df, total, fund_label = screen_stocks(base_df, extra_df, fund_df, params)
         if result_df.empty:
             st.warning(f"当前条件下未找到符合要求的股票（共筛查 {total} 只），可尝试放宽条件。")
         else:
@@ -223,7 +229,7 @@ if run_btn:
                 fmt[col] = fmt[col].map(lambda x: f"{x:.2f}")
             fmt["流通市值(亿)"] = fmt["流通市值(亿)"].map(lambda x: f"{x:.1f}")
             fmt["最新价"] = fmt["最新价"].map(lambda x: f"{x:.2f}")
-            fmt["3日主力净流入(万)"] = fmt["3日主力净流入(万)"].map(
+            fmt[fund_label] = fmt[fund_label].map(
                 lambda x: f"+{x:,.0f}" if pd.notna(x) and x > 0 else (f"{x:,.0f}" if pd.notna(x) else "-")
             )
             fmt["成交额(元)"] = fmt["成交额(元)"].map(lambda x: f"{x/1e8:.2f}亿" if pd.notna(x) else "-")
@@ -245,7 +251,7 @@ with st.expander("📖 尾盘八步法说明"):
 | 5 | 量价齐升 | ⚠️ 需人工复核 K 线 |
 | 6 | 均线多头排列 | ⚠️ 需人工复核均线 |
 | 7 | 分时均价线之上 | ⚠️ 需人工复核分时图 |
-| 8 | 资金持续流入 | ✅ 近3日主力净流入筛选 |
+| 8 | 资金持续流入 | ✅ 1天/3天/7天主力净流入筛选 |
 
 > ⚠️ **注意**：本工具仅作参考，不构成投资建议。入市有风险，操作需谨慎。
     """)
