@@ -13,7 +13,6 @@ st.set_page_config(page_title="尾盘选股", page_icon="📈", layout="wide",
 st.title("📈 尾盘选股系统")
 st.caption("适用时间：每个交易日 14:30 - 15:00")
 
-# ─── 侧边栏：筛选参数 ───────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ 筛选参数")
 
@@ -37,7 +36,6 @@ with st.sidebar:
 
     run_btn = st.button("🔍 开始筛选", type="primary", use_container_width=True)
 
-# ─── 大盘趋势提示 ───────────────────────────────────────────────────────────────
 st.subheader("🌐 大盘趋势参考")
 
 @st.cache_data(ttl=300)
@@ -73,7 +71,6 @@ else:
     except Exception as e:
         st.warning(f"大盘数据解析失败：{e}")
 
-# ─── 数据获取函数 ─────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=120)
 def fetch_sina_market():
     df = ak.stock_zh_a_spot()
@@ -109,29 +106,51 @@ def fetch_turnover_mv():
 
 @st.cache_data(ttl=300)
 def fetch_fund_flow_3d():
-    """3日主力净流入排行，返回代码→净流入额的映射"""
-    try:
-        df = ak.stock_individual_fund_flow_rank(indicator="3日")
-        df["净流入"] = pd.to_numeric(df["3日主力净流入-净额"], errors="coerce")
-        df["code_clean"] = df["代码"].astype(str).str.zfill(6)
-        return df[["code_clean", "净流入"]], None
-    except Exception as e:
-        return None, str(e)
+    """直连东财接口获取3日主力净流入，带重试"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0",
+        "Referer": "https://data.eastmoney.com/zjlx/list.html",
+    }
+    all_data = []
+    session = requests.Session()
+    for attempt in range(3):
+        try:
+            all_data = []
+            for pn in range(1, 60):
+                url = (
+                    "https://push2.eastmoney.com/api/qt/clist/get"
+                    f"?fid=f62&fs=m:0+t:6,m:0+t:13,m:0+t:80,m:1+t:2,m:1+t:23,m:1+t:4"
+                    f"&fields=f12,f14,f62&pn={pn}&pz=100&np=1&fltt=2&invt=2"
+                )
+                r = session.get(url, headers=headers, timeout=15)
+                data = r.json()
+                items = data.get("data", {}).get("diff", [])
+                if not items:
+                    break
+                all_data.extend(items)
+            if all_data:
+                break
+        except Exception:
+            continue
 
-# ─── 选股逻辑 ─────────────────────────────────────────────────────────────────────
+    if not all_data:
+        return None, "资金流向接口无法获取数据"
+
+    df = pd.DataFrame(all_data)
+    df["净流入"] = pd.to_numeric(df.get("f62", pd.Series()), errors="coerce")
+    df["code_clean"] = df["f12"].astype(str).str.zfill(6)
+    return df[["code_clean", "净流入"]], None
+
 st.subheader("📋 选股结果")
 
 def screen_stocks(base_df, extra_df, fund_df, params):
     d = base_df.copy()
     d["代码_clean"] = d["代码"].str.replace(r"^(sh|sz|bj)", "", regex=True)
-
     d = d.merge(extra_df, left_on="代码_clean", right_on="code_clean", how="inner")
-
     d["振幅"] = pd.to_numeric(d["振幅"], errors="coerce")
     d["涨跌幅"] = pd.to_numeric(d["涨跌幅"], errors="coerce")
     d = d.dropna(subset=["涨跌幅", "turnoverratio", "nmc"])
 
-    # 合并资金流向
     if fund_df is not None:
         d = d.merge(fund_df, left_on="代码_clean", right_on="code_clean", how="left")
     else:
@@ -151,16 +170,13 @@ def screen_stocks(base_df, extra_df, fund_df, params):
         mask = mask & (d["净流入"] > 0)
 
     result = d[mask].copy()
-
     cols = ["代码", "名称", "最新价", "涨跌幅", "turnoverratio", "nmc", "振幅", "净流入", "成交额"]
     labels = ["股票代码", "股票名称", "最新价", "涨跌幅(%)", "换手率(%)", "流通市值(亿)", "振幅(%)", "3日主力净流入(万)", "成交额(元)"]
     display = result[cols].copy()
     display.columns = labels
-    # 净流入转万元
     display["3日主力净流入(万)"] = display["3日主力净流入(万)"] / 10000
     display = display.sort_values("涨跌幅(%)", ascending=False).reset_index(drop=True)
     display.index += 1
-
     return display, len(d)
 
 if run_btn:
@@ -174,12 +190,13 @@ if run_btn:
 
     progress = st.progress(0, text="正在获取行情数据...")
     err = None
+    fund_df = None
     try:
         base_df = fetch_sina_market()
         progress.progress(35, text="正在获取换手率/市值数据（约20秒）...")
         extra_df, err = fetch_turnover_mv()
         if not err:
-            progress.progress(70, text="正在获取3日资金流向数据（约10秒）...")
+            progress.progress(70, text="正在获取3日资金流向数据...")
             fund_df, fund_err = fetch_fund_flow_3d()
             if fund_err:
                 st.warning(f"资金流向数据获取失败（{fund_err}），将跳过该条件")
@@ -196,12 +213,11 @@ if run_btn:
     elif extra_df is None:
         st.error("换手率数据为空")
     else:
-        result_df, total = screen_stocks(base_df, extra_df, fund_df if not err else None, params)
+        result_df, total = screen_stocks(base_df, extra_df, fund_df, params)
         if result_df.empty:
             st.warning(f"当前条件下未找到符合要求的股票（共筛查 {total} 只），可尝试放宽条件。")
         else:
             st.success(f"✅ 共筛选出 **{len(result_df)}** 只股票（共筛查 {total} 只）")
-
             fmt = result_df.copy()
             for col in ["涨跌幅(%)", "换手率(%)", "振幅(%)"]:
                 fmt[col] = fmt[col].map(lambda x: f"{x:.2f}")
@@ -211,16 +227,13 @@ if run_btn:
                 lambda x: f"+{x:,.0f}" if pd.notna(x) and x > 0 else (f"{x:,.0f}" if pd.notna(x) else "-")
             )
             fmt["成交额(元)"] = fmt["成交额(元)"].map(lambda x: f"{x/1e8:.2f}亿" if pd.notna(x) else "-")
-
             st.dataframe(fmt, use_container_width=True, height=600)
-
             csv = result_df.to_csv(index=True, encoding="utf-8-sig")
             now_str = datetime.now().strftime("%Y%m%d_%H%M")
             st.download_button("⬇️ 下载结果 CSV", csv, f"尾盘选股_{now_str}.csv", "text/csv")
 else:
     st.info("设置左侧筛选参数后，点击「开始筛选」按钮获取结果。")
 
-# ─── 策略说明 ─────────────────────────────────────────────────────────────────────
 with st.expander("📖 尾盘八步法说明"):
     st.markdown("""
 | 步骤 | 条件 | 本工具是否支持 |
