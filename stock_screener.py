@@ -122,6 +122,19 @@ def fetch_fund_flow(days: str):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0",
         "Referer": "https://data.eastmoney.com/zjlx/list.html",
     }
+
+    # 今日：优先用新浪即时接口（更稳定）
+    if days == "1天":
+        try:
+            df = ak.stock_fund_flow_individual(symbol="即时")
+            df["净流入"] = df["净额"].str.replace("亿", "").str.replace(",", "")
+            df["净流入"] = pd.to_numeric(df["净流入"], errors="coerce") * 1e8
+            df["code_clean"] = df["股票代码"].astype(str).str.zfill(6)
+            return df[["code_clean", "净流入"]], None
+        except Exception:
+            pass  # 失败则降级到东财接口
+
+    # 3日/7日：东财直连接口，带重试
     all_data = []
     session = requests.Session()
     for attempt in range(3):
