@@ -166,9 +166,8 @@ def screen_stocks(base_df, extra_df, params, progress_bar):
         n = len(pre_result)
         progress_bar.progress(80, text=f"正在查询 {n} 只股票的资金流向数据...")
         fund_df = fetch_fund_for_stocks(pre_result, days)
-        pre_result = pre_result.merge(fund_df, on="代码_clean", how="left", suffixes=("_old", ""))
-        if "净流入_old" in pre_result.columns:
-            pre_result.drop(columns=["净流入_old"], inplace=True)
+        fund_map = dict(zip(fund_df["code_clean"], fund_df["净流入"]))
+        pre_result["净流入"] = pre_result["代码_clean"].map(fund_map)
         pre_result = pre_result[pre_result["净流入"] > 0]
 
     cols = ["代码", "名称", "最新价", "涨跌幅", "turnoverratio", "nmc", "振幅", "净流入", "成交额"]
