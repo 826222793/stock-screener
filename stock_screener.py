@@ -112,63 +112,39 @@ def fetch_turnover_mv():
     df["code_clean"] = df["symbol"].str.replace(r"^(sh|sz|bj)", "", regex=True)
     return df[["code_clean", "turnoverratio", "nmc"]], None
 
-# 1天对应 f62，3天对应 f267，7天对应 f164
-FUND_FIELD_MAP = {"1天": "f62", "3天": "f267", "7天": "f164"}
+DAYS_MAP = {"1天": 1, "3天": 3, "7天": 7}
 
-@st.cache_data(ttl=300)
-def fetch_fund_flow(days: str):
-    field = FUND_FIELD_MAP.get(days, "f267")
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0",
-        "Referer": "https://data.eastmoney.com/zjlx/list.html",
-    }
+def get_market(raw_code: str, clean_code: str) -> str:
+    if str(raw_code).startswith("sh") or clean_code.startswith("6"):
+        return "sh"
+    if str(raw_code).startswith("bj") or clean_code.startswith(("4", "8")):
+        return "bj"
+    return "sz"
 
-    # 今日：优先用新浪即时接口（更稳定）
-    if days == "1天":
+def fetch_fund_for_stocks(codes_df: pd.DataFrame, days: int) -> pd.DataFrame:
+    """对筛选结果逐只查新浪资金流向，汇总近N日主力净流入"""
+    results = []
+    for _, row in codes_df.iterrows():
+        code = row["代码_clean"]
+        market = get_market(row.get("代码", code), code)
         try:
-            df = ak.stock_fund_flow_individual(symbol="即时")
-            df["净流入"] = df["净额"].str.replace("亿", "").str.replace(",", "")
-            df["净流入"] = pd.to_numeric(df["净流入"], errors="coerce") * 1e8
-            df["code_clean"] = df["股票代码"].astype(str).str.zfill(6)
-            return df[["code_clean", "净流入"]], None
+            df = ak.stock_individual_fund_flow(stock=code, market=market)
+            df["主力净流入-净额"] = pd.to_numeric(df["主力净流入-净额"], errors="coerce")
+            net = float(df.tail(days)["主力净流入-净额"].sum())
         except Exception:
-            pass  # 失败则降级到东财接口
-
-    # 3日/7日：东财直连接口，一次性拉全量避免翻页被拦截
-    session = requests.Session()
-    for attempt in range(3):
-        try:
-            url = (
-                "https://push2.eastmoney.com/api/qt/clist/get"
-                f"?fid={field}&fs=m:0+t:6,m:0+t:13,m:0+t:80,m:1+t:2,m:1+t:23,m:1+t:4"
-                f"&fields=f12,f14,{field}&pn=1&pz=5000&np=1&fltt=2&invt=2"
-            )
-            r = session.get(url, headers=headers, timeout=30)
-            items = r.json().get("data", {}).get("diff", [])
-            if items:
-                df = pd.DataFrame(items)
-                df["净流入"] = pd.to_numeric(df.get(field, pd.Series(dtype=float)), errors="coerce")
-                df["code_clean"] = df["f12"].astype(str).str.zfill(6)
-                return df[["code_clean", "净流入"]], None
-        except Exception:
-            continue
-
-    return None, "资金流向接口无法获取数据"
+            net = float("nan")
+        results.append({"code_clean": code, "净流入": net})
+    return pd.DataFrame(results)
 
 st.subheader("📋 选股结果")
 
-def screen_stocks(base_df, extra_df, fund_df, params):
+def screen_stocks(base_df, extra_df, params, progress_bar):
     d = base_df.copy()
     d["代码_clean"] = d["代码"].str.replace(r"^(sh|sz|bj)", "", regex=True)
     d = d.merge(extra_df, left_on="代码_clean", right_on="code_clean", how="inner")
     d["振幅"] = pd.to_numeric(d["振幅"], errors="coerce")
     d["涨跌幅"] = pd.to_numeric(d["涨跌幅"], errors="coerce")
     d = d.dropna(subset=["涨跌幅", "turnoverratio", "nmc"])
-
-    if fund_df is not None:
-        d = d.merge(fund_df, left_on="代码_clean", right_on="code_clean", how="left")
-    else:
-        d["净流入"] = float("nan")
 
     mask = (
         (d["涨跌幅"] >= params["min_pct"]) &
@@ -179,20 +155,30 @@ def screen_stocks(base_df, extra_df, fund_df, params):
         (d["nmc"] <= params["max_mv"]) &
         (d["振幅"] <= params["max_amplitude"])
     )
+    pre_result = d[mask].copy()
+    total = len(d)
 
-    if params["filter_fund"] and fund_df is not None:
-        mask = mask & (d["净流入"] > 0)
-
-    result = d[mask].copy()
     fund_label = f"{params['fund_days']}主力净流入(万)"
+    pre_result["净流入"] = float("nan")
+
+    if params["filter_fund"] and len(pre_result) > 0:
+        days = DAYS_MAP.get(params["fund_days"], 3)
+        n = len(pre_result)
+        progress_bar.progress(80, text=f"正在查询 {n} 只股票的资金流向数据...")
+        fund_df = fetch_fund_for_stocks(pre_result, days)
+        pre_result = pre_result.merge(fund_df, on="代码_clean", how="left", suffixes=("_old", ""))
+        if "净流入_old" in pre_result.columns:
+            pre_result.drop(columns=["净流入_old"], inplace=True)
+        pre_result = pre_result[pre_result["净流入"] > 0]
+
     cols = ["代码", "名称", "最新价", "涨跌幅", "turnoverratio", "nmc", "振幅", "净流入", "成交额"]
     labels = ["股票代码", "股票名称", "最新价", "涨跌幅(%)", "换手率(%)", "流通市值(亿)", "振幅(%)", fund_label, "成交额(元)"]
-    display = result[cols].copy()
+    display = pre_result[cols].copy()
     display.columns = labels
     display[fund_label] = display[fund_label] / 10000
     display = display.sort_values("涨跌幅(%)", ascending=False).reset_index(drop=True)
     display.index += 1
-    return display, len(d), fund_label
+    return display, total, fund_label
 
 if run_btn:
     params = {
@@ -206,30 +192,25 @@ if run_btn:
 
     progress = st.progress(0, text="正在获取行情数据...")
     err = None
-    fund_df = None
     try:
         base_df = fetch_sina_market()
-        progress.progress(35, text="正在获取换手率/市值数据（约20秒）...")
+        progress.progress(40, text="正在获取换手率/市值数据（约20秒）...")
         extra_df, err = fetch_turnover_mv()
-        if not err:
-            progress.progress(70, text=f"正在获取{fund_days}资金流向数据...")
-            fund_df, fund_err = fetch_fund_flow(fund_days)
-            if fund_err:
-                st.warning(f"资金流向数据获取失败（{fund_err}），将跳过该条件")
-                fund_df = None
-        progress.progress(95, text="正在筛选...")
     except Exception as e:
         err = str(e)
 
-    progress.progress(100, text="完成")
-    progress.empty()
-
     if err:
+        progress.empty()
         st.error(f"数据获取失败：{err}")
     elif extra_df is None:
+        progress.empty()
         st.error("换手率数据为空")
     else:
-        result_df, total, fund_label = screen_stocks(base_df, extra_df, fund_df, params)
+        progress.progress(70, text="正在初步筛选...")
+        result_df, total, fund_label = screen_stocks(base_df, extra_df, params, progress)
+        progress.progress(100, text="完成")
+        progress.empty()
+
         if result_df.empty:
             st.warning(f"当前条件下未找到符合要求的股票（共筛查 {total} 只），可尝试放宽条件。")
         else:
