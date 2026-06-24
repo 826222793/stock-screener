@@ -134,36 +134,26 @@ def fetch_fund_flow(days: str):
         except Exception:
             pass  # 失败则降级到东财接口
 
-    # 3日/7日：东财直连接口，带重试
-    all_data = []
+    # 3日/7日：东财直连接口，一次性拉全量避免翻页被拦截
     session = requests.Session()
     for attempt in range(3):
         try:
-            all_data = []
-            for pn in range(1, 60):
-                url = (
-                    "https://push2.eastmoney.com/api/qt/clist/get"
-                    f"?fid={field}&fs=m:0+t:6,m:0+t:13,m:0+t:80,m:1+t:2,m:1+t:23,m:1+t:4"
-                    f"&fields=f12,f14,{field}&pn={pn}&pz=100&np=1&fltt=2&invt=2"
-                )
-                r = session.get(url, headers=headers, timeout=15)
-                data = r.json()
-                items = data.get("data", {}).get("diff", [])
-                if not items:
-                    break
-                all_data.extend(items)
-            if all_data:
-                break
+            url = (
+                "https://push2.eastmoney.com/api/qt/clist/get"
+                f"?fid={field}&fs=m:0+t:6,m:0+t:13,m:0+t:80,m:1+t:2,m:1+t:23,m:1+t:4"
+                f"&fields=f12,f14,{field}&pn=1&pz=5000&np=1&fltt=2&invt=2"
+            )
+            r = session.get(url, headers=headers, timeout=30)
+            items = r.json().get("data", {}).get("diff", [])
+            if items:
+                df = pd.DataFrame(items)
+                df["净流入"] = pd.to_numeric(df.get(field, pd.Series(dtype=float)), errors="coerce")
+                df["code_clean"] = df["f12"].astype(str).str.zfill(6)
+                return df[["code_clean", "净流入"]], None
         except Exception:
             continue
 
-    if not all_data:
-        return None, "资金流向接口无法获取数据"
-
-    df = pd.DataFrame(all_data)
-    df["净流入"] = pd.to_numeric(df.get(field, pd.Series(dtype=float)), errors="coerce")
-    df["code_clean"] = df["f12"].astype(str).str.zfill(6)
-    return df[["code_clean", "净流入"]], None
+    return None, "资金流向接口无法获取数据"
 
 st.subheader("📋 选股结果")
 
